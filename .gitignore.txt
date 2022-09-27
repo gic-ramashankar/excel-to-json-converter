@@ -1,0 +1,14 @@
+### VS Code ###
+.vscode/
+logs/
+bin/
+.mvn/
+mvnw
+mvnw.cmd
+bin/
+uploads/
+test/
+demo/
+data/
+data/download/
+font/
