@@ -1,14 +1,19 @@
 package main
 
 import (
+	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/FerdinaKusumah/excel2json"
+	excelize "github.com/xuri/excelize/v2"
 )
 
 const maxUploadSize = 10 * 1024 * 1024 // 10 mb
@@ -25,78 +30,62 @@ func convertExcelIntoJson(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 32 MB is the default used by FormFile()
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	err := r.ParseMultipartForm(32 << 20)
+	checkError(w, err)
 
-	// Get a reference to the fileHeaders.
-	// They are accessible only after ParseMultipartForm is called
 	files := r.MultipartForm.File["file"]
+
 	if len(files) != 1 {
 		respondWithError(w, http.StatusBadRequest, "Please provide only one excel file")
 		return
 	}
+
 	for _, fileHeader := range files {
-		// Restrict the size of each uploaded file given size.
-		// To prevent the aggregate size from exceeding
-		// a specified value, use the http.MaxBytesReader() method
-		// before calling ParseMultipartForm()
+		fileName = fileHeader.Filename
+
+		segments := strings.Split(fileName, ".")
+		extension := segments[len(segments)-1]
+		if extension != "xlsx" {
+			respondWithError(w, http.StatusBadRequest, "Please provide excel file having xlsx extension")
+			return
+		}
 		if fileHeader.Size > maxUploadSize {
-			http.Error(w, fmt.Sprintf("The uploaded image is too big: %s. Please use an image less than 1MB in size", fileHeader.Filename), http.StatusBadRequest)
+			respondWithError(w, http.StatusBadRequest, fmt.Sprintf("The uploaded image is too big: %s. Please use an image less than 1MB in size", fileHeader.Filename))
 			return
 		}
 
 		// Open the file
 		file, err := fileHeader.Open()
-		if err != nil {
-			respondWithError(w, http.StatusBadRequest, fmt.Sprintf("%v", err))
-			return
-		}
+		checkError(w, err)
 
 		defer file.Close()
 
 		buff := make([]byte, 512)
 		_, err = file.Read(buff)
-		if err != nil {
-			respondWithError(w, http.StatusBadRequest, fmt.Sprintf("%v", err))
-			return
-		}
-
-		//	filetype := http.DetectContentType(buff)
-		// if filetype != ".xlsx" {
-		// 	respondWithError(w, http.StatusBadRequest, "The provided file format is not allowed. Please upload a xlsx file")
-		// 	return
-		// }
+		checkError(w, err)
 
 		_, err = file.Seek(0, io.SeekStart)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		checkError(w, err)
 
 		err = os.MkdirAll(dir, os.ModePerm)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		checkError(w, err)
 
 		f, err := os.Create(dir + fileHeader.Filename)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+		checkError(w, err)
 
 		defer f.Close()
 
 		_, err = io.Copy(f, file)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		fileName = fileHeader.Filename
+		checkError(w, err)
 	}
 	conversion(w, fileName)
+}
+
+func checkError(w http.ResponseWriter, err error) {
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, fmt.Sprintf("%v", err))
+		return
+	}
 }
 
 func respondWithJson(w http.ResponseWriter, code int, payload interface{}) {
@@ -109,32 +98,119 @@ func respondWithJson(w http.ResponseWriter, code int, payload interface{}) {
 func respondWithError(w http.ResponseWriter, code int, msg string) {
 	respondWithJson(w, code, map[string]string{"error": msg})
 }
+
+func conversion(w http.ResponseWriter, file string) {
+	name, _ := fetchSheetName(file)
+
+	var (
+		result []*map[string]interface{}
+		err    error
+		// select sheet name
+		sheetName = name
+		// if you want to show all headers just passing nil or empty list
+		headers = []string{}
+	)
+
+	if result, err = excel2json.GetExcelFilePath(dir+file, sheetName, headers); err != nil {
+		log.Println(`unable to parse file, error: %s`, err)
+		respondWithError(w, http.StatusBadRequest, fmt.Sprintf("%v", err))
+	}
+	respondWithJson(w, http.StatusAccepted, result)
+}
+
 func main() {
-	http.HandleFunc("/convert", convertExcelIntoJson)
+	http.HandleFunc("/convert-excel-to-json", convertExcelIntoJson)
+	http.HandleFunc("/convert-csv-to-json", csvToJson)
 	log.Println("Service Started at 8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func conversion(w http.ResponseWriter, file string) {
-	var (
-		result []*map[string]interface{}
-		err    error
-		//	path   = "D:/Go_Project/city-search-service/data/download/searchResult1_38_42_pm.xlsx"
-		// select sheet name
-		sheetName = "SearchData"
-		// select only selected field
-		// if you want to show all headers just passing nil or empty list
-		headers = []string{}
-	)
-	fmt.Println(dir + file)
-	if result, err = excel2json.GetExcelFilePath(dir+file, sheetName, headers); err != nil {
-		log.Println(`unable to parse file, error: %s`, err)
-		respondWithError(w, http.StatusBadRequest, fmt.Sprintf("%v", err))
+func csvToJson(w http.ResponseWriter, r *http.Request) {
 
+	// 32 MB is the default used by FormFile()
+	err := r.ParseMultipartForm(32 << 20)
+	checkError(w, err)
+
+	files := r.MultipartForm.File["file"][0]
+	fileName = files.Filename
+
+	segments := strings.Split(fileName, ".")
+	extension := segments[len(segments)-1]
+	if extension != "csv" {
+		respondWithError(w, http.StatusBadRequest, "Please provide excel file having csv extension")
+		return
 	}
-	for _, val := range result {
-		result, _ := json.Marshal(val)
-		fmt.Println(string(result))
+	fileBytes := ReadCSV(files)
+
+	respondWithJson(w, http.StatusAccepted, fileBytes)
+}
+
+// ReadCSV File
+func ReadCSV(file *multipart.FileHeader) string {
+	csvFile, err := file.Open()
+
+	if err != nil {
+		log.Fatal("The file is not found || wrong root")
 	}
-	respondWithJson(w, http.StatusAccepted, result)
+	defer csvFile.Close()
+
+	reader := csv.NewReader(csvFile)
+	content, _ := reader.ReadAll()
+
+	if len(content) < 1 {
+		log.Fatal("Something wrong, the file maybe empty or length of the lines are not the same")
+	}
+
+	headersArr := make([]string, 0)
+	for _, headE := range content[0] {
+		headersArr = append(headersArr, headE)
+	}
+
+	//Remove the header row
+	content = content[1:]
+
+	var buffer bytes.Buffer
+	buffer.WriteString("[")
+	for i, d := range content {
+		buffer.WriteString("{")
+		for j, y := range d {
+			buffer.WriteString(`"` + headersArr[j] + `":`)
+			buffer.WriteString((`"` + y + `"`))
+			//end of property
+			if j < len(d)-1 {
+				buffer.WriteString(",")
+			}
+
+		}
+		//end of object of the array
+		buffer.WriteString("}")
+		if i < len(content)-1 {
+			buffer.WriteString(",")
+		}
+	}
+
+	buffer.WriteString(`]`)
+	//rawMessage := json.RawMessage(buffer.String())
+	//x, err := json.MarshalIndent(rawMessage, "", "  ")
+	f := buffer.String()
+	f = strings.ReplaceAll(f, `\`, "")
+	fmt.Println(f)
+	return f
+}
+
+func fetchSheetName(fileName string) (string, error) {
+	var name string
+	xlsx, err := excelize.OpenFile(dir + fileName)
+	if err != nil {
+		log.Println(err)
+		return name, err
+	}
+	i := 0
+	for _, sheet := range xlsx.GetSheetMap() {
+		if i == 0 {
+			name = sheet
+		}
+		i++
+	}
+	return name, err
 }
