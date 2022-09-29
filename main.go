@@ -78,7 +78,8 @@ func convertExcelIntoJson(w http.ResponseWriter, r *http.Request) {
 		_, err = io.Copy(f, file)
 		checkError(w, err)
 	}
-	conversion(w, fileName)
+	//	conversion(w, fileName)
+	conversion2(w, fileName)
 }
 
 func checkError(w http.ResponseWriter, err error) {
@@ -213,4 +214,30 @@ func fetchSheetName(fileName string) (string, error) {
 		i++
 	}
 	return name, err
+}
+
+func conversion2(w http.ResponseWriter, file string) {
+	var (
+		headers []string
+		result  []*map[string]interface{}
+		wb      = new(excelize.File)
+		err     error
+	)
+	wb, err = excelize.OpenFile(dir + file)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Error while open file")
+		return
+	}
+	// Get all the rows in the Sheet.
+	sheetName, _ := fetchSheetName(file)
+	rows, _ := wb.GetRows(sheetName)
+	headers = rows[0]
+	for _, row := range rows[1:] {
+		var tmpMap = make(map[string]interface{})
+		for j, v := range row {
+			tmpMap[strings.Join(strings.Split(headers[j], " "), "")] = v
+		}
+		result = append(result, &tmpMap)
+	}
+	respondWithJson(w, http.StatusAccepted, result)
 }
